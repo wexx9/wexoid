@@ -1,34 +1,40 @@
 import telebot
 from telebot import types
 import sqlite3
-import json
 import time
 import re
 from datetime import datetime
 import threading
+import os
 
 # ==================== ТОКЕН ====================
 TOKEN = '8252035464:AAEPis3jNFf4dxv1Z6lBbYIzQyr7sp9uopE'
 bot = telebot.TeleBot(TOKEN)
 
+# ==================== АДМИНЫ ====================
+ADMINS = ['wexx9', 'eyewz', 'sollacrime']
+
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
-    conn = sqlite3.connect('market.db')
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     
-    # Таблица пользователей
+    # Пользователи
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             first_name TEXT,
             join_date TEXT,
+            balance INTEGER DEFAULT 0,
+            referrer_id INTEGER DEFAULT 0,
+            referrals INTEGER DEFAULT 0,
             is_admin INTEGER DEFAULT 0,
             is_banned INTEGER DEFAULT 0
         )
     ''')
     
-    # Таблица товаров
+    # Товары
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,87 +43,91 @@ def init_db():
             description TEXT,
             price INTEGER,
             category TEXT,
-            image_id TEXT,
+            server TEXT,
             status TEXT DEFAULT 'pending',
-            created_at TEXT,
-            views INTEGER DEFAULT 0,
-            is_pinned INTEGER DEFAULT 0,
-            pin_expire TEXT
+            created_at TEXT
         )
     ''')
     
-    # Таблица для закрепленных предложений
+    # Реферальные награды
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS pinned_offers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            product_id INTEGER,
-            pinned_at TEXT,
-            expire_at TEXT
-        )
-    ''')
-    
-    # Таблица для статистики
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS stats (
+        CREATE TABLE IF NOT EXISTS referrals_rewards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
-            action TEXT,
-            created_at TEXT
+            reward INTEGER DEFAULT 50,
+            claimed INTEGER DEFAULT 0
         )
     ''')
     
     conn.commit()
     conn.close()
-    print("✅ База данных инициализирована")
+    print("✅ База данных готова")
 
 init_db()
 
-# ==================== ФУНКЦИИ РАБОТЫ С БД ====================
-def add_user(user):
-    conn = sqlite3.connect('market.db')
+# ==================== ФУНКЦИИ БД ====================
+def add_user(user, referrer_id=0):
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (user.id,))
     if not cursor.fetchone():
         cursor.execute('''
-            INSERT INTO users (user_id, username, first_name, join_date, is_admin)
+            INSERT INTO users (user_id, username, first_name, join_date, referrer_id)
             VALUES (?, ?, ?, ?, ?)
-        ''', (user.id, user.username, user.first_name, datetime.now().strftime('%Y-%m-%d %H:%M'), 0))
+        ''', (user.id, user.username, user.first_name, datetime.now().strftime('%Y-%m-%d %H:%M'), referrer_id))
+        
+        # Награда рефереру
+        if referrer_id != 0:
+            cursor.execute('UPDATE users SET referrals = referrals + 1 WHERE user_id = ?', (referrer_id,))
+            cursor.execute('UPDATE users SET balance = balance + 50 WHERE user_id = ?', (referrer_id,))
         conn.commit()
     conn.close()
 
-def is_admin(user_id):
-    conn = sqlite3.connect('market.db')
+def get_user(user_id):
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT is_admin FROM users WHERE user_id = ?', (user_id,))
+    cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
     result = cursor.fetchone()
     conn.close()
-    return result and result[0] == 1
+    return result
+
+def get_all_users():
+    conn = sqlite3.connect('easyshop.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT user_id FROM users')
+    result = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in result]
+
+def is_admin(user_id):
+    user = get_user(user_id)
+    if not user:
+        return False
+    return user[7] == 1
 
 def is_banned(user_id):
-    conn = sqlite3.connect('market.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT is_banned FROM users WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result and result[0] == 1
+    user = get_user(user_id)
+    if not user:
+        return False
+    return user[8] == 1
 
-def add_product(seller_id, title, description, price, category, image_id):
-    conn = sqlite3.connect('market.db')
+def add_product(seller_id, title, description, price, category, server):
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO products (seller_id, title, description, price, category, image_id, status, created_at)
+        INSERT INTO products (seller_id, title, description, price, category, server, status, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (seller_id, title, description, price, category, image_id, 'pending', datetime.now().strftime('%Y-%m-%d %H:%M')))
+    ''', (seller_id, title, description, price, category, server, 'pending', datetime.now().strftime('%Y-%m-%d %H:%M')))
     product_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return product_id
 
 def get_pending_products():
-    conn = sqlite3.connect('market.db')
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT id, seller_id, title, description, price, category, image_id, created_at
+        SELECT id, seller_id, title, description, price, category, server, created_at
         FROM products WHERE status = 'pending'
         ORDER BY created_at ASC
     ''')
@@ -125,77 +135,44 @@ def get_pending_products():
     conn.close()
     return result
 
-def get_all_products():
-    conn = sqlite3.connect('market.db')
+def get_approved_products():
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT id, seller_id, title, description, price, category, image_id, created_at, views, is_pinned
+        SELECT id, seller_id, title, description, price, category, server, created_at
         FROM products WHERE status = 'approved'
-        ORDER BY is_pinned DESC, created_at DESC
+        ORDER BY created_at DESC
     ''')
     result = cursor.fetchall()
     conn.close()
     return result
 
-def get_product(product_id):
-    conn = sqlite3.connect('market.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT id, seller_id, title, description, price, category, image_id, created_at, views, is_pinned
-        FROM products WHERE id = ?
-    ''', (product_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result
-
 def approve_product(product_id):
-    conn = sqlite3.connect('market.db')
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('UPDATE products SET status = ? WHERE id = ?', ('approved', product_id))
     conn.commit()
     conn.close()
 
 def reject_product(product_id):
-    conn = sqlite3.connect('market.db')
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('UPDATE products SET status = ? WHERE id = ?', ('rejected', product_id))
     conn.commit()
     conn.close()
 
 def delete_product(product_id):
-    conn = sqlite3.connect('market.db')
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('DELETE FROM products WHERE id = ?', (product_id,))
     conn.commit()
     conn.close()
 
-def increment_views(product_id):
-    conn = sqlite3.connect('market.db')
-    cursor = conn.cursor()
-    cursor.execute('UPDATE products SET views = views + 1 WHERE id = ?', (product_id,))
-    conn.commit()
-    conn.close()
-
-def pin_product(product_id, hours=24):
-    conn = sqlite3.connect('market.db')
-    cursor = conn.cursor()
-    expire = (datetime.now().timestamp() + hours * 3600)
-    cursor.execute('UPDATE products SET is_pinned = ?, pin_expire = ? WHERE id = ?', (1, expire, product_id))
-    conn.commit()
-    conn.close()
-
-def unpin_product(product_id):
-    conn = sqlite3.connect('market.db')
-    cursor = conn.cursor()
-    cursor.execute('UPDATE products SET is_pinned = 0, pin_expire = NULL WHERE id = ?', (product_id,))
-    conn.commit()
-    conn.close()
-
 def get_user_products(user_id):
-    conn = sqlite3.connect('market.db')
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT id, title, description, price, category, image_id, status, created_at
+        SELECT id, title, description, price, category, server, status, created_at
         FROM products WHERE seller_id = ?
         ORDER BY created_at DESC
     ''', (user_id,))
@@ -203,119 +180,159 @@ def get_user_products(user_id):
     conn.close()
     return result
 
-def log_stats(user_id, action):
-    conn = sqlite3.connect('market.db')
+def update_balance(user_id, amount):
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
-    cursor.execute('INSERT INTO stats (user_id, action, created_at) VALUES (?, ?, ?)',
-                   (user_id, action, datetime.now().strftime('%Y-%m-%d %H:%M')))
+    cursor.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
     conn.commit()
     conn.close()
 
-# ==================== ОСНОВНОЕ МЕНЮ ====================
+def get_user_referrals(user_id):
+    conn = sqlite3.connect('easyshop.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT referrals FROM users WHERE user_id = ?', (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else 0
+
+def get_referral_link(user_id):
+    return f'https://t.me/EasyShopMarketBot?start=ref_{user_id}'
+
+# ==================== КЛАВИАТУРЫ ====================
 def main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    btn1 = types.KeyboardButton('📦 Товары')
-    btn2 = types.KeyboardButton('➕ Выставить товар')
-    btn3 = types.KeyboardButton('👤 Мой аккаунт')
-    btn4 = types.KeyboardButton('ℹ️ Информация')
-    btn5 = types.KeyboardButton('🔍 Поиск')
-    btn6 = types.KeyboardButton('⭐ Избранное')
-    markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
+    markup.add(
+        types.KeyboardButton('🛒 Товары'),
+        types.KeyboardButton('📦 Маркет')
+    )
+    markup.add(
+        types.KeyboardButton('👤 Профиль'),
+        types.KeyboardButton('➕ Выставить товар')
+    )
+    markup.add(
+        types.KeyboardButton('ℹ️ Информация'),
+        types.KeyboardButton('🆘 Поддержка')
+    )
+    if is_admin_quick():
+        markup.add(types.KeyboardButton('👑 Админ панель'))
     return markup
 
 def admin_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    btn1 = types.KeyboardButton('📋 Модерация')
-    btn2 = types.KeyboardButton('📊 Статистика')
-    btn3 = types.KeyboardButton('📌 Управление закрепами')
-    btn4 = types.KeyboardButton('🚫 Бан-лист')
-    btn5 = types.KeyboardButton('📢 Рассылка')
-    btn6 = types.KeyboardButton('⬅️ Главное меню')
-    markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
+    markup.add(
+        types.KeyboardButton('📋 Модерация'),
+        types.KeyboardButton('📊 Статистика')
+    )
+    markup.add(
+        types.KeyboardButton('📢 Рассылка'),
+        types.KeyboardButton('🚫 Бан-лист')
+    )
+    markup.add(
+        types.KeyboardButton('⬅️ Главное меню')
+    )
     return markup
+
+def is_admin_quick():
+    # Проверка в момент создания клавиатуры
+    return False  # Заменяется на проверку в обработчиках
 
 # ==================== КОМАНДЫ ====================
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
-    add_user(message.from_user)
+    referrer_id = 0
+    
+    # Проверяем реферальную ссылку
+    if message.text and 'ref_' in message.text:
+        try:
+            referrer_id = int(message.text.split('_')[1])
+        except:
+            pass
+    
+    add_user(message.from_user, referrer_id)
     
     if is_banned(user_id):
-        bot.send_message(user_id, '🚫 Вы заблокированы в этом боте!')
+        bot.send_message(user_id, '🚫 Вы заблокированы!')
         return
     
-    welcome_text = (
-        "🌸 **Добро пожаловать в Маркет**\n\n"
-        "🛒 Здесь ты можешь покупать и продавать сеты, ресурсы и услуги.\n"
-        "💰 Продавай свои товары или находи лучшие предложения!\n\n"
-        "📌 Используй кнопки ниже для навигации:"
+    welcome = (
+        "🌸 **Добро пожаловать в EasyShop!**\n\n"
+        "🛒 Твой магазин для покупки и продажи:\n"
+        "• 💎 Сапфиры\n"
+        "• 💰 Валюта\n"
+        "• ⚔️ Сеты\n"
+        "• 👤 Аккаунты\n\n"
+        "📌 Используй кнопки ниже:"
     )
     
     markup = main_keyboard()
-    bot.send_message(user_id, welcome_text, parse_mode='Markdown', reply_markup=markup)
+    # Добавляем админку если есть
+    if is_admin(user_id):
+        markup.add(types.KeyboardButton('👑 Админ панель'))
+    
+    bot.send_message(user_id, welcome, parse_mode='Markdown', reply_markup=markup)
 
-# ==================== ОБРАБОТЧИК КНОПОК ====================
-@bot.message_handler(func=lambda message: message.text == '📦 Товары')
-def list_products(message):
+# ==================== ТОВАРЫ ====================
+@bot.message_handler(func=lambda message: message.text == '🛒 Товары')
+def products_menu(message):
     user_id = message.from_user.id
     if is_banned(user_id):
         bot.send_message(user_id, '🚫 Вы заблокированы!')
         return
     
-    products = get_all_products()
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton('💎 Сапфиры', callback_data='cat_sapphires'),
+        types.InlineKeyboardButton('💰 Валюта', callback_data='cat_currency'),
+        types.InlineKeyboardButton('⚔️ Сеты', callback_data='cat_sets'),
+        types.InlineKeyboardButton('👤 Аккаунты', callback_data='cat_accounts')
+    )
     
-    if not products:
-        bot.send_message(user_id, '📭 Пока нет доступных товаров.')
+    bot.send_message(user_id, '📂 **Выбери категорию:**', parse_mode='Markdown', reply_markup=markup)
+
+# ==================== МАРКЕТ ====================
+@bot.message_handler(func=lambda message: message.text == '📦 Маркет')
+def market_menu(message):
+    user_id = message.from_user.id
+    if is_banned(user_id):
+        bot.send_message(user_id, '🚫 Вы заблокированы!')
         return
     
-    # Отправляем товары по одному
-    for product in products[:10]:  # Показываем 10 последних
+    products = get_approved_products()
+    
+    if not products:
+        bot.send_message(user_id, '📭 Пока нет товаров в маркете.')
+        return
+    
+    # Отправляем первые 5 товаров
+    for product in products[:5]:
         send_product_card(user_id, product)
 
 def send_product_card(chat_id, product):
-    product_id, seller_id, title, description, price, category, image_id, created_at, views, is_pinned = product
+    product_id, seller_id, title, description, price, category, server, created_at = product
     
-    # Увеличиваем просмотры
-    increment_views(product_id)
-    
-    # Получаем информацию о продавце
-    conn = sqlite3.connect('market.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT username, first_name FROM users WHERE user_id = ?', (seller_id,))
-    seller = cursor.fetchone()
-    conn.close()
-    
-    seller_name = seller[1] if seller else 'Неизвестный'
-    seller_username = f'@{seller[0]}' if seller and seller[0] else f'ID: {seller_id}'
-    
-    pin_emoji = '📌 ' if is_pinned else ''
-    price_text = f'💰 {price}₽'
+    seller = get_user(seller_id)
+    seller_name = seller[2] if seller else 'Неизвестный'
+    seller_username = f'@{seller[1]}' if seller and seller[1] else f'ID: {seller_id}'
     
     text = (
-        f"{pin_emoji}**{title}**\n\n"
+        f"**{title}**\n\n"
         f"📝 {description}\n\n"
-        f"{price_text}\n"
+        f"💰 Цена: {price}₽\n"
         f"📂 Категория: {category}\n"
+        f"🖥️ Сервер: {server}\n"
         f"👤 Продавец: {seller_name} ({seller_username})\n"
-        f"👁️ Просмотров: {views}\n"
         f"🕐 Добавлен: {created_at}\n"
     )
     
     markup = types.InlineKeyboardMarkup()
     btn1 = types.InlineKeyboardButton('💬 Написать продавцу', url=f'tg://user?id={seller_id}')
-    btn2 = types.InlineKeyboardButton('⭐ В избранное', callback_data=f'fav_{product_id}')
-    btn3 = types.InlineKeyboardButton('📊 Пожаловаться', callback_data=f'report_{product_id}')
-    markup.add(btn1, btn2, btn3)
+    btn2 = types.InlineKeyboardButton('📊 Пожаловаться', callback_data=f'report_{product_id}')
+    markup.add(btn1, btn2)
     
-    if image_id:
-        try:
-            bot.send_photo(chat_id, image_id, caption=text, parse_mode='Markdown', reply_markup=markup)
-        except:
-            bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=markup)
-    else:
-        bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=markup)
+    bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=markup)
 
-# ==================== ВЫСТАВЛЕНИЕ ТОВАРА ====================
+# ==================== ВЫСТАВИТЬ ТОВАР ====================
 @bot.message_handler(func=lambda message: message.text == '➕ Выставить товар')
 def start_sell(message):
     user_id = message.from_user.id
@@ -325,181 +342,113 @@ def start_sell(message):
     
     msg = bot.send_message(user_id, 
         "📝 **Выставление товара**\n\n"
-        "Отправьте:\n"
-        "1️⃣ Название товара\n"
-        "2️⃣ Описание\n"
-        "3️⃣ Цену\n"
-        "4️⃣ Категорию (сеты, ресурсы, услуги, другое)\n"
-        "5️⃣ Фото (необязательно)\n\n"
-        "📌 Отправляйте информацию по очереди.\n"
-        "❌ Для отмены напишите /cancel"
+        "Отправь название товара:\n"
+        "❌ /cancel — отмена"
     )
-    bot.register_next_step_handler(msg, process_sell_step1)
+    bot.register_next_step_handler(msg, process_title)
 
-def process_sell_step1(message):
+def process_title(message):
     if message.text == '/cancel':
-        bot.send_message(message.chat.id, '❌ Выставление отменено')
+        bot.send_message(message.chat.id, '❌ Отменено')
         return
-    user_id = message.from_user.id
     
-    # Сохраняем название
-    conn = sqlite3.connect('market.db')
+    user_id = message.from_user.id
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('INSERT INTO temp_sell (user_id, title) VALUES (?, ?)', (user_id, message.text))
     conn.commit()
     conn.close()
     
-    msg = bot.send_message(user_id, '📝 Введите описание товара:')
-    bot.register_next_step_handler(msg, process_sell_step2)
+    msg = bot.send_message(user_id, '📝 Напиши описание товара:')
+    bot.register_next_step_handler(msg, process_description)
 
-def process_sell_step2(message):
+def process_description(message):
     if message.text == '/cancel':
         bot.send_message(message.chat.id, '❌ Отменено')
         return
+    
     user_id = message.from_user.id
-    
-    # Проверка на маты и рофлы
-    bad_words = ['мат', 'рофл', 'лох', 'дурак', 'идиот', 'тупой', 'херня']
-    for word in bad_words:
-        if word.lower() in message.text.lower():
-            bot.send_message(user_id, f'🚫 Текст содержит запрещенное слово: "{word}". Измените описание.')
-            msg = bot.send_message(user_id, '📝 Введите описание снова:')
-            bot.register_next_step_handler(msg, process_sell_step2)
-            return
-    
-    conn = sqlite3.connect('market.db')
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('UPDATE temp_sell SET description = ? WHERE user_id = ?', (message.text, user_id))
     conn.commit()
     conn.close()
     
     msg = bot.send_message(user_id, '💰 Введите цену (только число):')
-    bot.register_next_step_handler(msg, process_sell_step3)
+    bot.register_next_step_handler(msg, process_price)
 
-def process_sell_step3(message):
+def process_price(message):
     if message.text == '/cancel':
         bot.send_message(message.chat.id, '❌ Отменено')
         return
-    user_id = message.from_user.id
     
+    user_id = message.from_user.id
     try:
         price = int(message.text)
         if price <= 0:
             raise ValueError
     except:
-        bot.send_message(user_id, '🚫 Введите корректное число (больше 0)!')
+        bot.send_message(user_id, '🚫 Введи корректное число!')
         msg = bot.send_message(user_id, '💰 Введите цену:')
-        bot.register_next_step_handler(msg, process_sell_step3)
+        bot.register_next_step_handler(msg, process_price)
         return
     
-    conn = sqlite3.connect('market.db')
+    conn = sqlite3.connect('easyshop.db')
     cursor = conn.cursor()
     cursor.execute('UPDATE temp_sell SET price = ? WHERE user_id = ?', (price, user_id))
     conn.commit()
     conn.close()
     
-    msg = bot.send_message(user_id, 
-        "📂 Введите категорию:\n"
-        "• сеты\n"
-        "• ресурсы\n"
-        "• услуги\n"
-        "• другое"
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton('💎 Сапфиры', callback_data='sell_sapphires'),
+        types.InlineKeyboardButton('💰 Валюта', callback_data='sell_currency'),
+        types.InlineKeyboardButton('⚔️ Сеты', callback_data='sell_sets'),
+        types.InlineKeyboardButton('👤 Аккаунты', callback_data='sell_accounts')
     )
-    bot.register_next_step_handler(msg, process_sell_step4)
+    
+    msg = bot.send_message(user_id, '📂 Выбери категорию:', reply_markup=markup)
+    bot.register_next_step_handler(msg, process_category)
 
-def process_sell_step4(message):
+def process_category(message):
     if message.text == '/cancel':
         bot.send_message(message.chat.id, '❌ Отменено')
         return
-    user_id = message.from_user.id
-    category = message.text.lower()
     
-    if category not in ['сеты', 'ресурсы', 'услуги', 'другое']:
-        bot.send_message(user_id, '🚫 Неверная категория! Выберите из списка.')
-        msg = bot.send_message(user_id, '📂 Введите категорию (сеты, ресурсы, услуги, другое):')
-        bot.register_next_step_handler(msg, process_sell_step4)
-        return
-    
-    conn = sqlite3.connect('market.db')
-    cursor = conn.cursor()
-    cursor.execute('UPDATE temp_sell SET category = ? WHERE user_id = ?', (category, user_id))
-    conn.commit()
-    conn.close()
-    
-    msg = bot.send_message(user_id, '🖼️ Отправьте фото товара (или нажмите /skip)')
-    bot.register_next_step_handler(msg, process_sell_step5)
+    # Обработка выбора категории через callback
+    pass
 
-def process_sell_step5(message):
-    if message.text == '/cancel':
-        bot.send_message(message.chat.id, '❌ Отменено')
-        return
-    user_id = message.from_user.id
-    
-    image_id = None
-    if message.photo:
-        image_id = message.photo[-1].file_id
-    elif message.text != '/skip':
-        bot.send_message(user_id, '🚫 Пожалуйста, отправьте фото или нажмите /skip')
-        msg = bot.send_message(user_id, '🖼️ Отправьте фото товара (или нажмите /skip)')
-        bot.register_next_step_handler(msg, process_sell_step5)
-        return
-    
-    # Сохраняем товар
-    conn = sqlite3.connect('market.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT title, description, price, category FROM temp_sell WHERE user_id = ?', (user_id,))
-    data = cursor.fetchone()
-    
-    if data:
-        title, description, price, category = data
-        product_id = add_product(user_id, title, description, price, category, image_id)
-        
-        cursor.execute('DELETE FROM temp_sell WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        
-        bot.send_message(user_id, 
-            f"✅ Ваш товар отправлен на модерацию!\n"
-            f"📦 Название: {title}\n"
-            f"💰 Цена: {price}₽\n"
-            f"📂 Категория: {category}\n\n"
-            f"⏳ Ожидайте подтверждения администратора."
-        )
-        
-        # Уведомление админам
-        for admin_id in [8252035464, 1087968824]:  # Добавьте свои ID админов
-            try:
-                bot.send_message(admin_id, 
-                    f"🆕 Новый товар на модерацию!\n"
-                    f"📦 {title}\n"
-                    f"💰 {price}₽\n"
-                    f"👤 @{message.from_user.username or 'Нет'}\n"
-                    f"🆔 ID товара: {product_id}"
-                )
-            except:
-                pass
-
-# ==================== МОЙ АККАУНТ ====================
-@bot.message_handler(func=lambda message: message.text == '👤 Мой аккаунт')
-def my_account(message):
+# ==================== ПРОФИЛЬ ====================
+@bot.message_handler(func=lambda message: message.text == '👤 Профиль')
+def profile(message):
     user_id = message.from_user.id
     if is_banned(user_id):
         bot.send_message(user_id, '🚫 Вы заблокированы!')
         return
     
-    products = get_user_products(user_id)
+    user = get_user(user_id)
+    if not user:
+        bot.send_message(user_id, '❌ Профиль не найден!')
+        return
+    
+    referrals = get_user_referrals(user_id)
+    link = get_referral_link(user_id)
     
     text = (
-        f"👤 **Ваш аккаунт**\n\n"
-        f"🆔 ID: {user_id}\n"
-        f"📛 Имя: {message.from_user.first_name}\n"
-        f"👤 Username: @{message.from_user.username or 'Нет'}\n"
-        f"📦 Ваших товаров: {len(products)}\n"
+        f"👤 **Ваш профиль**\n\n"
+        f"🆔 ID: {user[0]}\n"
+        f"📛 Имя: {user[2]}\n"
+        f"👤 Username: @{user[1] or 'Нет'}\n"
+        f"💰 Баланс: {user[4]}₽\n"
+        f"👥 Рефералов: {referrals}\n"
+        f"🔗 Ссылка: {link}\n"
+        f"📅 Дата регистрации: {user[3]}\n"
     )
     
     markup = types.InlineKeyboardMarkup()
-    btn = types.InlineKeyboardButton('📦 Мои товары', callback_data=f'my_products_{user_id}')
-    markup.add(btn)
+    btn1 = types.InlineKeyboardButton('🔗 Реферальная ссылка', callback_data='ref_link')
+    btn2 = types.InlineKeyboardButton('📊 Мои товары', callback_data='my_products')
+    markup.add(btn1, btn2)
     
     bot.send_message(user_id, text, parse_mode='Markdown', reply_markup=markup)
 
@@ -507,22 +456,158 @@ def my_account(message):
 @bot.message_handler(func=lambda message: message.text == 'ℹ️ Информация')
 def info(message):
     text = (
-        "📖 **О Маркете**\n\n"
-        "🛒 Это маркетплейс для продажи сетов, ресурсов и услуг.\n\n"
+        "📖 **О EasyShop**\n\n"
+        "🛒 Это магазин для покупки и продажи:\n"
+        "• 💎 Сапфиры\n"
+        "• 💰 Валюта\n"
+        "• ⚔️ Сеты\n"
+        "• 👤 Аккаунты\n\n"
         "📌 **Правила:**\n"
         "• Запрещены маты и оскорбления\n"
         "• Только честные сделки\n"
-        "• Администрация не несет ответственности за сделки\n\n"
+        "• Администрация не несет ответственности\n\n"
         "🤝 Удачных покупок и продаж!"
     )
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
+# ==================== ПОДДЕРЖКА ====================
+@bot.message_handler(func=lambda message: message.text == '🆘 Поддержка')
+def support(message):
+    text = (
+        "🆘 **Поддержка**\n\n"
+        "Если у тебя возникли вопросы или проблемы:\n\n"
+        "📩 Напиши нам:\n"
+        "• @sollacrime\n"
+        "• @eyewz\n"
+        "• @wexx9\n\n"
+        "⏳ Отвечаем в течение 24 часов."
+    )
+    bot.send_message(message.chat.id, text, parse_mode='Markdown')
+
+# ==================== КОЛБЭКИ ====================
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    user_id = call.from_user.id
+    data = call.data
+    
+    # Категории товаров
+    if data.startswith('cat_'):
+        category = data.replace('cat_', '')
+        products = get_approved_products()
+        found = [p for p in products if p[5] == category]
+        
+        if not found:
+            bot.answer_callback_query(call.id, '📭 Нет товаров в этой категории')
+            return
+        
+        for product in found[:5]:
+            send_product_card(user_id, product)
+        bot.answer_callback_query(call.id, f'📦 Найдено {len(found)} товаров')
+    
+    # Реферальная ссылка
+    elif data == 'ref_link':
+        link = get_referral_link(user_id)
+        bot.send_message(user_id, f'🔗 Твоя реферальная ссылка:\n{link}')
+        bot.answer_callback_query(call.id)
+    
+    # Мои товары
+    elif data == 'my_products':
+        products = get_user_products(user_id)
+        if not products:
+            bot.send_message(user_id, '📭 У тебя нет товаров.')
+        else:
+            for p in products[:5]:
+                text = f"📦 {p[1]}\n💰 {p[3]}₽\n📂 {p[4]}\n🖥️ {p[5]}\n📊 {p[6]}"
+                bot.send_message(user_id, text)
+        bot.answer_callback_query(call.id)
+    
+    # Пожаловаться
+    elif data.startswith('report_'):
+        product_id = data.split('_')[1]
+        for admin in ADMINS:
+            try:
+                bot.send_message(f'@{admin}', f'⚠️ Жалоба на товар ID: {product_id}\nОт: @{call.from_user.username}')
+            except:
+                pass
+        bot.answer_callback_query(call.id, '📊 Жалоба отправлена!')
+    
+    # Выбор категории при продаже
+    elif data.startswith('sell_'):
+        category = data.replace('sell_', '')
+        conn = sqlite3.connect('easyshop.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT title, description, price FROM temp_sell WHERE user_id = ?', (user_id,))
+        data = cursor.fetchone()
+        conn.close()
+        
+        if data:
+            title, description, price = data
+            
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton('NeverTime', callback_data=f'server_NeverTime_{category}'),
+                types.InlineKeyboardButton('FunTime', callback_data=f'server_FunTime_{category}'),
+                types.InlineKeyboardButton('Phoenix', callback_data=f'server_Phoenix_{category}'),
+                types.InlineKeyboardButton('Frizmine', callback_data=f'server_Frizmine_{category}')
+            )
+            
+            bot.send_message(user_id, '🖥️ Выбери сервер:', reply_markup=markup)
+    
+    # Выбор сервера
+    elif data.startswith('server_'):
+        parts = data.split('_')
+        server = parts[1]
+        category = parts[2]
+        
+        conn = sqlite3.connect('easyshop.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT title, description, price FROM temp_sell WHERE user_id = ?', (user_id,))
+        data = cursor.fetchone()
+        
+        if data:
+            title, description, price = data
+            product_id = add_product(user_id, title, description, price, category, server)
+            
+            cursor.execute('DELETE FROM temp_sell WHERE user_id = ?', (user_id,))
+            conn.commit()
+            conn.close()
+            
+            bot.send_message(user_id, 
+                f"✅ Товар отправлен на модерацию!\n\n"
+                f"📦 {title}\n"
+                f"💰 {price}₽\n"
+                f"📂 {category}\n"
+                f"🖥️ {server}\n\n"
+                f"⏳ Ожидай подтверждения."
+            )
+            
+            # Уведомляем админов
+            for admin in ADMINS:
+                try:
+                    bot.send_message(f'@{admin}', 
+                        f"🆕 Новый товар!\n"
+                        f"📦 {title}\n"
+                        f"💰 {price}₽\n"
+                        f"👤 @{call.from_user.username}\n"
+                        f"🖥️ {server}"
+                    )
+                except:
+                    pass
+
 # ==================== АДМИН ПАНЕЛЬ ====================
-@bot.message_handler(func=lambda message: message.text == '📋 Модерация')
-def moderation_panel(message):
+@bot.message_handler(func=lambda message: message.text == '👑 Админ панель')
+def admin_panel(message):
     user_id = message.from_user.id
     if not is_admin(user_id):
-        bot.send_message(user_id, '🚫 У вас нет прав!')
+        bot.send_message(user_id, '🚫 Нет доступа!')
+        return
+    
+    bot.send_message(user_id, '👑 **Админ панель**', parse_mode='Markdown', reply_markup=admin_keyboard())
+
+@bot.message_handler(func=lambda message: message.text == '📋 Модерация')
+def moderation(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
         return
     
     pending = get_pending_products()
@@ -532,135 +617,202 @@ def moderation_panel(message):
         return
     
     for product in pending[:5]:
-        product_id, seller_id, title, description, price, category, image_id, created_at = product
+        product_id, seller_id, title, description, price, category, server, created_at = product
         
         text = (
             f"📦 **Товар на модерацию**\n\n"
             f"🆔 ID: {product_id}\n"
-            f"📛 Название: {title}\n"
-            f"📝 Описание: {description}\n"
-            f"💰 Цена: {price}₽\n"
-            f"📂 Категория: {category}\n"
+            f"📛 {title}\n"
+            f"📝 {description}\n"
+            f"💰 {price}₽\n"
+            f"📂 {category}\n"
+            f"🖥️ {server}\n"
             f"👤 Продавец: {seller_id}\n"
         )
         
         markup = types.InlineKeyboardMarkup()
         btn1 = types.InlineKeyboardButton('✅ Одобрить', callback_data=f'approve_{product_id}')
         btn2 = types.InlineKeyboardButton('❌ Отклонить', callback_data=f'reject_{product_id}')
-        btn3 = types.InlineKeyboardButton('✏️ Изменить', callback_data=f'edit_{product_id}')
-        markup.add(btn1, btn2, btn3)
+        markup.add(btn1, btn2)
         
-        if image_id:
-            try:
-                bot.send_photo(user_id, image_id, caption=text, parse_mode='Markdown', reply_markup=markup)
-            except:
-                bot.send_message(user_id, text, parse_mode='Markdown', reply_markup=markup)
-        else:
-            bot.send_message(user_id, text, parse_mode='Markdown', reply_markup=markup)
+        bot.send_message(user_id, text, parse_mode='Markdown', reply_markup=markup)
 
-# ==================== КОЛБЭКИ ====================
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    user_id = call.from_user.id
-    data = call.data
+@bot.message_handler(func=lambda message: message.text == '📊 Статистика')
+def stats(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
     
-    # Одобрение товара
-    if data.startswith('approve_'):
-        if not is_admin(user_id):
-            bot.answer_callback_query(call.id, '🚫 Нет прав!')
-            return
+    users = get_all_users()
+    products = get_approved_products()
+    pending = get_pending_products()
+    
+    text = (
+        f"📊 **Статистика**\n\n"
+        f"👥 Пользователей: {len(users)}\n"
+        f"📦 Одобрено: {len(products)}\n"
+        f"⏳ На модерации: {len(pending)}\n"
+    )
+    bot.send_message(user_id, text, parse_mode='Markdown')
+
+@bot.message_handler(func=lambda message: message.text == '📢 Рассылка')
+def broadcast_start(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    msg = bot.send_message(user_id, '📝 Введите сообщение для рассылки:')
+    bot.register_next_step_handler(msg, process_broadcast)
+
+def process_broadcast(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    users = get_all_users()
+    sent = 0
+    failed = 0
+    
+    status = bot.send_message(user_id, f'⏳ Рассылка... 0/{len(users)}')
+    
+    for i, uid in enumerate(users):
+        try:
+            bot.send_message(uid, f'📢 {message.text}')
+            sent += 1
+        except:
+            failed += 1
+        time.sleep(0.05)
         
-        product_id = int(data.split('_')[1])
+        if i % 10 == 0:
+            bot.edit_message_text(f'⏳ Рассылка... {i}/{len(users)}', user_id, status.message_id)
+    
+    bot.edit_message_text(
+        f'✅ Рассылка завершена!\n'
+        f'📤 Отправлено: {sent}\n'
+        f'❌ Ошибок: {failed}',
+        user_id, status.message_id
+    )
+
+@bot.message_handler(func=lambda message: message.text == '🚫 Бан-лист')
+def ban_menu(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    msg = bot.send_message(user_id, 'Введи ID пользователя для бана (или /unban ID для разбана):')
+    bot.register_next_step_handler(msg, process_ban)
+
+def process_ban(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    if message.text.startswith('/unban'):
+        try:
+            uid = int(message.text.split(' ')[1])
+            conn = sqlite3.connect('easyshop.db')
+            cursor = conn.cursor()
+            cursor.execute('UPDATE users SET is_banned = 0 WHERE user_id = ?', (uid,))
+            conn.commit()
+            conn.close()
+            bot.send_message(user_id, f'✅ Пользователь {uid} разбанен!')
+        except:
+            bot.send_message(user_id, '❌ Неверный формат! Используй: /unban ID')
+    else:
+        try:
+            uid = int(message.text)
+            conn = sqlite3.connect('easyshop.db')
+            cursor = conn.cursor()
+            cursor.execute('UPDATE users SET is_banned = 1 WHERE user_id = ?', (uid,))
+            conn.commit()
+            conn.close()
+            bot.send_message(user_id, f'✅ Пользователь {uid} забанен!')
+            try:
+                bot.send_message(uid, '🚫 Вы забанены!')
+            except:
+                pass
+        except:
+            bot.send_message(user_id, '❌ Введи корректный ID!')
+
+@bot.message_handler(func=lambda message: message.text == '⬅️ Главное меню')
+def back_to_main(message):
+    user_id = message.from_user.id
+    markup = main_keyboard()
+    if is_admin(user_id):
+        markup.add(types.KeyboardButton('👑 Админ панель'))
+    bot.send_message(user_id, '⬅️ Главное меню', reply_markup=markup)
+
+# ==================== ОБРАБОТЧИК КОЛБЭКОВ АДМИНОВ ====================
+@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_') or call.data.startswith('reject_'))
+def admin_actions(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, '🚫 Нет прав!')
+        return
+    
+    action, product_id = call.data.split('_')
+    product_id = int(product_id)
+    
+    if action == 'approve':
         approve_product(product_id)
-        
-        bot.answer_callback_query(call.id, '✅ Товар одобрен!')
+        bot.answer_callback_query(call.id, '✅ Одобрено!')
         bot.edit_message_text('✅ Товар одобрен', call.message.chat.id, call.message.message_id)
         
         # Уведомляем продавца
-        conn = sqlite3.connect('market.db')
+        conn = sqlite3.connect('easyshop.db')
         cursor = conn.cursor()
         cursor.execute('SELECT seller_id, title FROM products WHERE id = ?', (product_id,))
         result = cursor.fetchone()
         conn.close()
-        
         if result:
-            seller_id, title = result
             try:
-                bot.send_message(seller_id, f'✅ Ваш товар "{title}" одобрен и опубликован!')
+                bot.send_message(result[0], f'✅ Ваш товар "{result[1]}" одобрен!')
             except:
                 pass
     
-    # Отклонение товара
-    elif data.startswith('reject_'):
-        if not is_admin(user_id):
-            bot.answer_callback_query(call.id, '🚫 Нет прав!')
-            return
+    elif action == 'reject':
+        reject_product(product_id)
+        bot.answer_callback_query(call.id, '❌ Отклонено!')
+        bot.edit_message_text('❌ Товар отклонен', call.message.chat.id, call.message.message_id)
         
-        product_id = int(data.split('_')[1])
-        
-        # Запрашиваем причину
-        msg = bot.send_message(user_id, 'Введите причину отклонения:')
-        bot.register_next_step_handler(msg, lambda m: process_reject(m, product_id))
-        bot.answer_callback_query(call.id, '✏️ Введите причину')
-    
-    # Закреп товара
-    elif data.startswith('pin_'):
-        if not is_admin(user_id):
-            bot.answer_callback_query(call.id, '🚫 Нет прав!')
-            return
-        
-        product_id = int(data.split('_')[1])
-        pin_product(product_id, hours=24)
-        bot.answer_callback_query(call.id, '📌 Товар закреплен на 24 часа!')
-    
-    # Избранное
-    elif data.startswith('fav_'):
-        product_id = int(data.split('_')[1])
-        bot.answer_callback_query(call.id, '⭐ Добавлено в избранное!')
-    
-    # Пожаловаться
-    elif data.startswith('report_'):
-        product_id = int(data.split('_')[1])
-        
-        # Уведомляем админов
-        for admin_id in [8252035464, 1087968824]:
+        # Уведомляем продавца
+        conn = sqlite3.connect('easyshop.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT seller_id, title FROM products WHERE id = ?', (product_id,))
+        result = cursor.fetchone()
+        conn.close()
+        if result:
             try:
-                bot.send_message(admin_id, f'⚠️ Жалоба на товар ID: {product_id}\nОт: @{call.from_user.username}')
+                bot.send_message(result[0], f'❌ Ваш товар "{result[1]}" отклонен.')
             except:
                 pass
-        
-        bot.answer_callback_query(call.id, '📊 Жалоба отправлена админу!')
-
-def process_reject(message, product_id):
-    reason = message.text
-    reject_product(product_id)
-    
-    # Уведомляем продавца
-    conn = sqlite3.connect('market.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT seller_id, title FROM products WHERE id = ?', (product_id,))
-    result = cursor.fetchone()
-    conn.close()
-    
-    if result:
-        seller_id, title = result
-        try:
-            bot.send_message(seller_id, f'❌ Ваш товар "{title}" отклонен.\nПричина: {reason}')
-        except:
-            pass
-    
-    bot.send_message(message.chat.id, f'❌ Товар отклонен. Причина: {reason}')
 
 # ==================== ЗАПУСК ====================
-print("🚀 Бот запущен!")
-print("=" * 40)
-print(f"📌 Токен: {TOKEN[:10]}...")
-print("📌 Бот работает!")
-print("=" * 40)
-
-while True:
-    try:
-        bot.infinity_polling(timeout=60)
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        time.sleep(5)
+if __name__ == '__main__':
+    # Создаём таблицу temp_sell если нет
+    conn = sqlite3.connect('easyshop.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS temp_sell (
+            user_id INTEGER PRIMARY KEY,
+            title TEXT,
+            description TEXT,
+            price INTEGER,
+            category TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    
+    print("=" * 40)
+    print("🚀 БОТ ЗАПУЩЕН")
+    print("=" * 40)
+    print(f"👑 Админы: {', '.join(ADMINS)}")
+    print("=" * 40)
+    
+    while True:
+        try:
+            bot.infinity_polling(timeout=60)
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+            time.sleep(5)
